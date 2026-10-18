@@ -106,6 +106,11 @@ export default function FancyVisualizer({ analyser, mode, thresholdDb }: Props) 
     const observer = new ResizeObserver(resize)
     observer.observe(canvas)
 
+    if (analyser) {
+      // narrower range = quiet sounds register more clearly in the spectrum
+      analyser.minDecibels = -85
+      analyser.maxDecibels = -25
+    }
     const raw = new Float32Array(analyser ? analyser.fftSize : 1)
     const history = Array.from({ length: HISTORY }, () => new Float32Array(POINTS))
     const xs = new Float32Array(POINTS * 2)
@@ -170,6 +175,8 @@ export default function FancyVisualizer({ analyser, mode, thresholdDb }: Props) 
     let lastPulse = 0
     // 0 = silence, 1 = sound heard
     let gate = 0
+    let flash = 0 // brief brightness kick on sudden loud sounds
+    let prevFlashE = 0
 
     /** Snapshot of the waveform into history[head]: real sound, or a soft drifting wave when silent. */
     const capture = (t: number) => {
@@ -195,15 +202,17 @@ export default function FancyVisualizer({ analyser, mode, thresholdDb }: Props) 
           const b = start + Math.floor(((i + 1) * span) / POINTS)
           let sum = 0
           for (let j = a; j < b; j++) sum += raw[j]
-          out[i] = Math.tanh((sum / Math.max(1, b - a)) * 4) // soft-clip so loud sounds stay on screen
+          out[i] = Math.tanh((sum / Math.max(1, b - a)) * 6) // soft-clip so loud sounds stay on screen
         }
       } else {
         out.fill(0)
       }
 
-      // noise gate: opens quickly when sound arrives, fades out slowly after it stops
-      const target = level > Math.pow(10, thresholdRef.current / 20) ? 1 : 0
-      gate += (target - gate) * (target > gate ? 0.35 : 0.04)
+      // graded noise gate: shut 6 dB below the threshold, fully open 6 dB above it
+      const levelDb = level > 0 ? 20 * Math.log10(level) : -120
+      const x = Math.min(1, Math.max(0, (levelDb - (thresholdRef.current - 6)) / 12))
+      const target = x * x * (3 - 2 * x)
+      gate += (target - gate) * (target > gate ? 0.5 : 0.06)
 
       let sq = 0
       for (let i = 0; i < POINTS; i++) {
@@ -223,7 +232,7 @@ export default function FancyVisualizer({ analyser, mode, thresholdDb }: Props) 
           let m = 0
           for (let j = colLo[c]; j < colHi[c]; j++) if (bins[j] > m) m = bins[j]
           // emphasise peaks, hide the noise floor, tilt up the quiet high end
-          realSpec[c] = Math.min(1, Math.pow(m / 255, 2.0) * (1 + (0.9 * c) / COLS))
+          realSpec[c] = Math.min(1, Math.pow(m / 255, 1.5) * (1 + (0.9 * c) / COLS))
         }
       } else {
         realSpec.fill(0)
@@ -231,7 +240,7 @@ export default function FancyVisualizer({ analyser, mode, thresholdDb }: Props) 
       for (let c = 0; c < COLS; c++) {
         const target = realSpec[c] * gate
         const cur = specSmooth[c]
-        specSmooth[c] = cur + (target - cur) * (target > cur ? 0.55 : 0.1)
+        specSmooth[c] = cur + (target - cur) * (target > cur ? 0.7 : 0.16)
         spec[c] = specSmooth[c] + idleSpec(c, ti) * IDLE_AMP * (1 - gate)
       }
       let prev = spec[0]
@@ -244,7 +253,7 @@ export default function FancyVisualizer({ analyser, mode, thresholdDb }: Props) 
     }
 
     /** Overall brightness: calm glow while silent, full blaze when sound is heard. */
-    const vis = () => 0.6 + 0.4 * gate
+    const vis = () => Math.min(1.25, 0.6 + 0.4 * gate + 0.35 * flash)
 
     const drawAurora = (t: number, e: number) => {
       const cy = H / 2
@@ -505,6 +514,9 @@ export default function FancyVisualizer({ analyser, mode, thresholdDb }: Props) 
       capture(t)
       const e = Math.min(1, energy * 2.2)
       const m = modeRef.current
+      // onset detector: a sudden rise in loudness flashes the whole picture
+      flash = Math.max(flash * 0.9, Math.min(1, Math.max(0, energy - prevFlashE) * 25))
+      prevFlashE = energy
 
       g.globalCompositeOperation = 'source-over'
       g.shadowBlur = 0
@@ -566,7 +578,7 @@ export default function FancyVisualizer({ analyser, mode, thresholdDb }: Props) 
         bctx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, bloom.width, bloom.height)
         g.shadowBlur = 0
         g.globalCompositeOperation = 'lighter'
-        g.globalAlpha = (m === 'ridge' ? 0.3 : 0.45) + 0.2 * gate
+        g.globalAlpha = (m === 'ridge' ? 0.3 : 0.45) + 0.2 * gate + 0.25 * flash
         g.drawImage(bloom, 0, 0, W, H)
         g.globalAlpha = 1
       }

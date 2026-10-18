@@ -47,8 +47,8 @@ export default function Monitor() {
           <span>less sensitive · {THRESHOLD_MAX}</span>
         </div>
         <p className="setting-help">
-          The visualizer only comes alive when the input is louder than this level; below it, it shows its calm idle
-          wave. The dashed line on the level meter above shows where it sits. Start listening, stay quiet, and set it
+          The visualizer starts reacting a little below this level and is fully awake a little above it; when it's
+          quieter, it shows its calm idle wave. The dashed line on the level meter above shows where it sits. Start listening, stay quiet, and set it
           just above your background noise.
         </p>
         <button className="link-btn" onClick={() => setThresholdDb(THRESHOLD_DEFAULT)}>
