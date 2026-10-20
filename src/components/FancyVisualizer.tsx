@@ -15,7 +15,7 @@ const LAYERS = 9
 const LAYER_LAG = 4 // frames between two trailing layers
 const PARTICLES = 110
 const BLOOM_DIV = 6 // glow buffer is 1/6 of the screen size
-const IDLE_AMP = 0.45 // how tall the resting wave is, relative to real sound
+const IDLE_AMP = 0.2 // how tall the resting wave is, relative to real sound
 const IDLE_SPEED = 0.6 // how fast the resting wave drifts
 
 // spectrum ("ridge") look

@@ -1,58 +1,77 @@
 import { useSyncExternalStore } from 'react'
 
-/** User settings, kept in localStorage so the visualizer page and the monitor page share them. */
+/** User settings, kept in localStorage so all pages share them. */
 
-const KEY = 'noyzora.soundThresholdDb'
+interface NumberSetting {
+  readonly min: number
+  readonly max: number
+  readonly def: number
+  /** React hook returning the current value. */
+  use: () => number
+  set: (value: number) => void
+}
 
-export const THRESHOLD_MIN = -60
-export const THRESHOLD_MAX = -20
-export const THRESHOLD_DEFAULT = -42
+function createNumberSetting(key: string, def: number, min: number, max: number): NumberSetting {
+  const clamp = (v: number) => Math.min(max, Math.max(min, Math.round(v)))
 
-const clamp = (v: number) => Math.min(THRESHOLD_MAX, Math.max(THRESHOLD_MIN, Math.round(v)))
-
-function read(): number {
-  try {
-    const raw = window.localStorage.getItem(KEY)
-    if (raw !== null) {
-      const n = Number(raw)
-      if (Number.isFinite(n)) return clamp(n)
+  const read = (): number => {
+    try {
+      const raw = window.localStorage.getItem(key)
+      if (raw !== null) {
+        const n = Number(raw)
+        if (Number.isFinite(n)) return clamp(n)
+      }
+    } catch {
+      /* storage unavailable (private mode etc.): fall back to the default */
     }
-  } catch {
-    /* storage unavailable (private mode etc.): fall back to the default */
+    return def
   }
-  return THRESHOLD_DEFAULT
-}
 
-let current = read()
-const listeners = new Set<() => void>()
+  let current = read()
+  const listeners = new Set<() => void>()
 
-/** Level (dBFS) the input has to exceed before the visualizer starts moving. */
-export function setThresholdDb(value: number) {
-  current = clamp(value)
-  try {
-    window.localStorage.setItem(KEY, String(current))
-  } catch {
-    /* ignore */
+  const set = (value: number) => {
+    current = clamp(value)
+    try {
+      window.localStorage.setItem(key, String(current))
+    } catch {
+      /* ignore */
+    }
+    listeners.forEach((l) => l())
   }
-  listeners.forEach((l) => l())
-}
 
-function subscribe(callback: () => void) {
-  listeners.add(callback)
-  // pick up changes made in another tab
-  const onStorage = (e: StorageEvent) => {
-    if (e.key === KEY) {
-      current = read()
-      callback()
+  const subscribe = (callback: () => void) => {
+    listeners.add(callback)
+    // pick up changes made in another tab
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === key) {
+        current = read()
+        callback()
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => {
+      listeners.delete(callback)
+      window.removeEventListener('storage', onStorage)
     }
   }
-  window.addEventListener('storage', onStorage)
-  return () => {
-    listeners.delete(callback)
-    window.removeEventListener('storage', onStorage)
-  }
+
+  return { min, max, def, set, use: () => useSyncExternalStore(subscribe, () => current) }
 }
 
-export function useThresholdDb(): number {
-  return useSyncExternalStore(subscribe, () => current)
-}
+/** Visualizer: input level (dBFS) around which the animation wakes up. */
+export const soundThreshold = createNumberSetting('noyzora.soundThresholdDb', -42, -60, -20)
+
+/** Classroom meter: estimated dB(A) where "getting loud" starts / where it is "too loud". */
+export const cautionLevel = createNumberSetting('noyzora.classroom.cautionDb', 60, 30, 100)
+export const alarmLevel = createNumberSetting('noyzora.classroom.alarmDb', 70, 35, 110)
+
+/** Classroom meter: added to the A-weighted dBFS reading to estimate dB(A). Set by calibration. */
+export const calibrationOffset = createNumberSetting('noyzora.classroom.offsetDb', 100, 40, 140)
+
+// names used by the monitor and visualizer pages
+export const THRESHOLD_MIN = soundThreshold.min
+export const THRESHOLD_MAX = soundThreshold.max
+export const THRESHOLD_DEFAULT = soundThreshold.def
+export const setThresholdDb = soundThreshold.set
+export const useThresholdDb = soundThreshold.use

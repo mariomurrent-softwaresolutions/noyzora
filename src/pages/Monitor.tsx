@@ -60,6 +60,10 @@ export default function Monitor() {
         <Link to="/visualizer" className="nav-link">
           Open full-screen visualizer →
         </Link>
+        <br />
+        <Link to="/classroom" className="nav-link">
+          Open classroom noise meter →
+        </Link>
       </p>
       <p className="hint">
         dBFS is relative to digital full scale (0 = loudest the input can represent). It is not calibrated sound

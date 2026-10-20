@@ -1,22 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createAWeighting } from '../audio/aWeighting'
+import { MIN_DB, meanSquare, powerToDb, smoothingCoefficient } from '../audio/meterMath'
+
+export { MIN_DB }
 
 export type MicStatus = 'idle' | 'requesting' | 'listening' | 'denied' | 'error'
 
-export const MIN_DB = -90
-
-/** Convert a linear amplitude (0..1) to dBFS, clamped at MIN_DB. */
-export function toDb(amplitude: number): number {
-  if (amplitude <= 0) return MIN_DB
-  return Math.max(MIN_DB, 20 * Math.log10(amplitude))
+export interface MicOptions {
+  /** Weight the level the way a sound level meter does (dB(A)). The analyser stays unweighted. */
+  aWeighted?: boolean
 }
+
+/** "Fast" time weighting of a sound level meter. */
+const LEVEL_TAU_MS = 125
+const PEAK_HOLD_MS = 1500
+const UI_INTERVAL_MS = 50
 
 interface MicState {
   status: MicStatus
   error: string | null
-  /** Current RMS level in dBFS (0 = digital full scale, negative below that). */
+  /** Current level in dBFS (0 = digital full scale, negative below that). */
   db: number
   /** Peak level held for ~1.5s, in dBFS. */
   peakDb: number
+  /** Unweighted signal, for visualisations. */
   analyser: AnalyserNode | null
 }
 
@@ -29,10 +36,10 @@ const initial: MicState = {
 }
 
 /**
- * Opens the microphone, feeds it into an AnalyserNode and measures loudness.
- * The analyser is returned so visualisations can read the raw waveform.
+ * Opens the microphone and measures loudness. The returned analyser carries the raw
+ * (unweighted) signal so visualisations can read the waveform and spectrum.
  */
-export function useMicrophone() {
+export function useMicrophone(options: MicOptions = {}) {
   const [state, setState] = useState<MicState>(initial)
 
   const ctxRef = useRef<AudioContext | null>(null)
@@ -40,12 +47,17 @@ export function useMicrophone() {
   const rafRef = useRef<number>(0)
   // bumped on every start/stop so a stale async start can detect it was cancelled
   const genRef = useRef(0)
-  const removeUnlockRef = useRef<(() => void) | null>(null)
+  const removeListenersRef = useRef<(() => void) | null>(null)
+  const aWeightedRef = useRef(options.aWeighted ?? false)
+
+  useEffect(() => {
+    aWeightedRef.current = options.aWeighted ?? false
+  }, [options.aWeighted])
 
   const stop = useCallback(() => {
     genRef.current++
-    removeUnlockRef.current?.()
-    removeUnlockRef.current = null
+    removeListenersRef.current?.()
+    removeListenersRef.current = null
     cancelAnimationFrame(rafRef.current)
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null
@@ -74,6 +86,7 @@ export function useMicrophone() {
         stream.getTracks().forEach((t) => t.stop())
         return
       }
+
       const ctx = new AudioContext()
       // Browsers keep an AudioContext suspended until the user interacts with the page.
       const unlock = () => {
@@ -82,44 +95,65 @@ export function useMicrophone() {
       unlock()
       window.addEventListener('pointerdown', unlock)
       window.addEventListener('keydown', unlock)
-      removeUnlockRef.current = () => {
+
+      // A device that is unplugged or revoked ends its track.
+      const track = stream.getAudioTracks()[0]
+      const onEnded = () => {
+        if (gen !== genRef.current) return
+        stop()
+        setState({ ...initial, status: 'error', error: 'The microphone was disconnected.' })
+      }
+      track?.addEventListener('ended', onEnded)
+      removeListenersRef.current = () => {
         window.removeEventListener('pointerdown', unlock)
         window.removeEventListener('keydown', unlock)
+        track?.removeEventListener('ended', onEnded)
       }
+
       const source = ctx.createMediaStreamSource(stream)
       const analyser = ctx.createAnalyser()
       analyser.fftSize = 2048
       analyser.smoothingTimeConstant = 0
-      source.connect(analyser) // intentionally not connected to destination (no feedback)
+
+      // Visual analyser: raw signal. Level meter: optionally A-weighted.
+      source.connect(analyser)
+      let meter = analyser
+      if (aWeightedRef.current) {
+        const chain = createAWeighting(ctx)
+        meter = ctx.createAnalyser()
+        meter.fftSize = 2048
+        meter.smoothingTimeConstant = 0
+        source.connect(chain.input)
+        chain.output.connect(meter)
+      }
+      // intentionally nothing is connected to ctx.destination (no feedback)
 
       streamRef.current = stream
       ctxRef.current = ctx
       setState({ ...initial, status: 'listening', analyser })
 
-      const buffer = new Float32Array(analyser.fftSize)
-      let smoothed = MIN_DB
+      const buffer = new Float32Array(meter.fftSize)
+      let smoothedPower = 0
+      let last = performance.now()
       let peak = MIN_DB
       let peakAt = 0
       let lastUi = 0
 
       const tick = (now: number) => {
-        analyser.getFloatTimeDomainData(buffer)
-        let sum = 0
-        for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i]
-        const instant = toDb(Math.sqrt(sum / buffer.length))
+        meter.getFloatTimeDomainData(buffer)
+        smoothedPower += (meanSquare(buffer) - smoothedPower) * smoothingCoefficient(now - last, LEVEL_TAU_MS)
+        last = now
+        const db = powerToDb(smoothedPower)
 
-        // Fast attack, slower release, so the number is readable.
-        smoothed = instant > smoothed ? instant : smoothed * 0.9 + instant * 0.1
-
-        if (smoothed >= peak || now - peakAt > 1500) {
-          peak = smoothed
+        if (db >= peak || now - peakAt > PEAK_HOLD_MS) {
+          peak = db
           peakAt = now
         }
 
         // Update React state ~20x/second, not every frame.
-        if (now - lastUi > 50) {
+        if (now - lastUi > UI_INTERVAL_MS) {
           lastUi = now
-          setState((s) => ({ ...s, db: smoothed, peakDb: peak }))
+          setState((s) => ({ ...s, db, peakDb: peak }))
         }
         rafRef.current = requestAnimationFrame(tick)
       }
@@ -132,7 +166,7 @@ export function useMicrophone() {
         error: denied ? 'Microphone permission was denied.' : e instanceof Error ? e.message : 'Unknown error',
       })
     }
-  }, [])
+  }, [stop])
 
   useEffect(() => stop, [stop])
 
